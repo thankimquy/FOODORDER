@@ -6,8 +6,11 @@ import {
   LayoutDashboard, 
   Plus, 
   Trash2, 
+  Edit2,
+  X,
   Download, 
   ChevronRight,
+  ChevronLeft,
   TrendingUp,
   ShoppingBag,
   DollarSign,
@@ -23,14 +26,16 @@ import { FoodItem, Order, OrderItem, ViewType } from './types';
 import { exportToExcel, generateExcelBuffer, parseExcelData } from './services/excelService';
 
 const LOCAL_STORAGE_KEY = 'food_order_app_data_v4';
+const ORDERS_PER_PAGE = 5;
 
 export default function App() {
   const [view, setView] = useState<ViewType>('dashboard');
   const [foods, setFoods] = useState<FoodItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [orderSearchTerm, setOrderSearchTerm] = useState('');
   
-  // File System State - Fix: Use any for FileSystemFileHandle which may not be available in standard TypeScript types
+  // File System State
   const [fileHandle, setFileHandle] = useState<any | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -38,6 +43,10 @@ export default function App() {
   const [foodForm, setFoodForm] = useState({ name: '', price: '' });
   const [orderCustomerName, setOrderCustomerName] = useState('');
   const [draftQuantities, setDraftQuantities] = useState<Record<string, number>>({});
+  const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
+
+  // Pagination state
+  const [orderCurrentPage, setOrderCurrentPage] = useState(1);
 
   // 1. Load Initial Data from LocalStorage
   useEffect(() => {
@@ -64,7 +73,6 @@ export default function App() {
     
     setIsSyncing(true);
     try {
-      // Fix: Use 'any' cast as 'FileSystemPermissionMode' might not be defined in the current TypeScript environment
       const options = { mode: 'readwrite' as any };
       if ((await fileHandle.queryPermission(options)) !== 'granted') {
         if ((await fileHandle.requestPermission(options)) !== 'granted') {
@@ -96,7 +104,6 @@ export default function App() {
   // Connect to a file
   const connectFile = async () => {
     try {
-      // Fix: Cast 'window' to 'any' to access the experimental 'showOpenFilePicker' API
       const [handle] = await (window as any).showOpenFilePicker({
         types: [{
           description: 'Excel Files',
@@ -155,6 +162,25 @@ export default function App() {
     setDraftQuantities(prev => ({ ...prev, [foodId]: Math.max(0, qty) }));
   };
 
+  const startEditOrder = (order: Order) => {
+    setEditingOrderId(order.id);
+    setOrderCustomerName(order.customerName);
+    
+    const newDraft: Record<string, number> = {};
+    order.items.forEach(item => {
+      newDraft[item.foodId] = item.quantity;
+    });
+    setDraftQuantities(newDraft);
+    
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const cancelEdit = () => {
+    setEditingOrderId(null);
+    setOrderCustomerName('');
+    setDraftQuantities({});
+  };
+
   const addOrder = (e: React.FormEvent) => {
     e.preventDefault();
     const items: OrderItem[] = (Object.entries(draftQuantities) as [string, number][])
@@ -170,22 +196,34 @@ export default function App() {
       return;
     }
     
-    const newOrder: Order = {
-      id: Math.random().toString(36).substr(2, 9),
-      customerName: orderCustomerName,
-      items,
-      orderDate: new Date().toLocaleString('vi-VN')
-    };
+    if (editingOrderId) {
+      setOrders(orders.map(o => o.id === editingOrderId ? {
+        ...o,
+        customerName: orderCustomerName,
+        items,
+        orderDate: o.orderDate
+      } : o));
+      setEditingOrderId(null);
+      alert("Đơn hàng đã được cập nhật!");
+    } else {
+      const newOrder: Order = {
+        id: Math.random().toString(36).substr(2, 9),
+        customerName: orderCustomerName,
+        items,
+        orderDate: new Date().toLocaleString('vi-VN')
+      };
+      setOrders([...orders, newOrder]);
+      alert("Đơn hàng đã được lưu!");
+    }
     
-    setOrders([...orders, newOrder]);
     setOrderCustomerName('');
     setDraftQuantities({});
-    alert("Đơn hàng đã được lưu!");
   };
 
   const removeOrder = (id: string) => {
     if (confirm("Xác nhận xóa đơn hàng này?")) {
       setOrders(orders.filter(o => o.id !== id));
+      if (editingOrderId === id) cancelEdit();
     }
   };
 
@@ -209,6 +247,24 @@ export default function App() {
     sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0);
 
   const filteredFoods = foods.filter(f => f.name.toLowerCase().includes(searchTerm.toLowerCase()));
+
+  // Order List Logic (Filter + Pagination)
+  const filteredOrdersList = useMemo(() => {
+    const list = orders.slice().reverse();
+    if (!orderSearchTerm) return list;
+    return list.filter(o => o.customerName.toLowerCase().includes(orderSearchTerm.toLowerCase()));
+  }, [orders, orderSearchTerm]);
+
+  const totalOrderPages = Math.ceil(filteredOrdersList.length / ORDERS_PER_PAGE);
+  const paginatedOrders = useMemo(() => {
+    const start = (orderCurrentPage - 1) * ORDERS_PER_PAGE;
+    return filteredOrdersList.slice(start, start + ORDERS_PER_PAGE);
+  }, [filteredOrdersList, orderCurrentPage]);
+
+  // Reset page when searching
+  useEffect(() => {
+    setOrderCurrentPage(1);
+  }, [orderSearchTerm]);
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-slate-50">
@@ -424,10 +480,23 @@ export default function App() {
               </div>
 
               <div className="lg:col-span-2 space-y-6">
-                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl shadow-slate-200">
-                  <div className="flex items-center gap-2 mb-6">
-                    <ShoppingCart size={20} className="text-emerald-400" />
-                    <h3 className="font-bold text-lg">Xác nhận đơn hàng</h3>
+                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl shadow-slate-200 relative">
+                  {editingOrderId && (
+                    <div className="absolute -top-3 left-6 px-3 py-1 bg-amber-500 text-slate-900 text-[10px] font-black rounded-full shadow-lg flex items-center gap-1 animate-bounce">
+                      <Edit2 size={10} /> ĐANG CHỈNH SỬA ĐƠN
+                    </div>
+                  )}
+                  
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-2">
+                      <ShoppingCart size={20} className="text-emerald-400" />
+                      <h3 className="font-bold text-lg">Xác nhận đơn hàng</h3>
+                    </div>
+                    {editingOrderId && (
+                      <button onClick={cancelEdit} className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors flex items-center gap-1 text-[10px] font-bold">
+                        <X size={12} /> HỦY
+                      </button>
+                    )}
                   </div>
 
                   <div className="space-y-4 mb-6 min-h-[100px] max-h-[300px] overflow-y-auto pr-2 custom-scrollbar-dark">
@@ -455,39 +524,100 @@ export default function App() {
                     <span className="text-2xl font-black text-emerald-400">{draftTotal.toLocaleString()}đ</span>
                   </div>
 
-                  <button onClick={addOrder} disabled={!orderCustomerName || draftTotal === 0} className="w-full py-4 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed active:scale-[0.98]">HOÀN TẤT ĐẶT MÓN</button>
+                  <button 
+                    onClick={addOrder} 
+                    disabled={!orderCustomerName || draftTotal === 0} 
+                    className={`w-full py-4 font-bold rounded-xl transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed active:scale-[0.98] ${editingOrderId ? 'bg-amber-500 hover:bg-amber-600 text-slate-900' : 'bg-emerald-500 hover:bg-emerald-600 text-white'}`}
+                  >
+                    {editingOrderId ? 'CẬP NHẬT ĐƠN HÀNG' : 'HOÀN TẤT ĐẶT MÓN'}
+                  </button>
                 </div>
 
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[500px]">
-                  <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                    <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2"><ClipboardList size={16} className="text-emerald-600" /> Các đơn gần đây</h4>
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[650px]">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col gap-3">
+                    <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2">
+                      <ClipboardList size={16} className="text-emerald-600" /> Đơn đặt hàng
+                    </h4>
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input 
+                        type="text" 
+                        placeholder="Tìm theo tên khách..." 
+                        value={orderSearchTerm}
+                        onChange={e => setOrderSearchTerm(e.target.value)}
+                        className="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none text-xs transition-all"
+                      />
+                    </div>
                   </div>
-                  <div className="divide-y divide-slate-100 overflow-y-auto custom-scrollbar">
-                    {orders.slice().reverse().map(order => (
-                      <div key={order.id} className="p-5 hover:bg-slate-50 transition-colors relative group border-l-4 border-l-transparent hover:border-l-emerald-500">
-                        <button onClick={() => removeOrder(order.id)} className="absolute right-4 top-4 p-2 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all"><Trash2 size={16} /></button>
-                        <div className="flex justify-between items-start mb-3 pr-8">
-                          <div>
-                            <div className="font-bold text-slate-900 leading-tight">{order.customerName}</div>
-                            <div className="text-[10px] text-slate-400 mt-1">{order.orderDate}</div>
-                          </div>
-                          <div className="text-sm font-black text-emerald-600 whitespace-nowrap">{getOrderTotal(order).toLocaleString()}đ</div>
+                  
+                  <div className="divide-y divide-slate-100 overflow-y-auto flex-1 custom-scrollbar">
+                    {paginatedOrders.map(order => (
+                      <div key={order.id} className={`p-4 hover:bg-slate-50 transition-colors relative group border-l-4 ${editingOrderId === order.id ? 'bg-amber-50/30 border-l-amber-500' : 'border-l-transparent hover:border-l-emerald-500'}`}>
+                        <div className="absolute right-3 top-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                          <button onClick={() => startEditOrder(order)} className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-md transition-colors"><Edit2 size={14} /></button>
+                          <button onClick={() => removeOrder(order.id)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"><Trash2 size={14} /></button>
                         </div>
-                        <div className="space-y-1.5">
+                        
+                        <div className="flex justify-between items-start mb-2 pr-16">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-bold text-slate-900 leading-tight truncate">{order.customerName}</div>
+                            <div className="text-[9px] text-slate-400 mt-0.5">{order.orderDate}</div>
+                          </div>
+                          <div className="text-xs font-black text-emerald-600 whitespace-nowrap">{getOrderTotal(order).toLocaleString()}đ</div>
+                        </div>
+                        <div className="flex flex-wrap gap-1">
                           {order.items.map((item, idx) => {
                             const food = foods.find(f => f.id === item.foodId);
                             return (
-                              <div key={idx} className="flex justify-between items-center text-xs text-slate-600 bg-slate-50 p-2 rounded-lg border border-slate-100">
-                                <span className="font-semibold text-slate-800">{food?.name || 'Món đã xóa'} x{item.quantity}</span>
-                                <span className="text-[10px] text-emerald-600 font-medium">{((food?.price || 0) * item.quantity).toLocaleString()}đ</span>
-                              </div>
+                              <span key={idx} className="text-[10px] text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                                {food?.name || 'Đã xóa'} x{item.quantity}
+                              </span>
                             );
                           })}
                         </div>
                       </div>
                     ))}
-                    {orders.length === 0 && <div className="p-12 text-center text-slate-300 text-sm italic">Chưa có dữ liệu.</div>}
+                    {filteredOrdersList.length === 0 && (
+                      <div className="p-12 text-center text-slate-300 text-sm italic">
+                        {orderSearchTerm ? 'Không tìm thấy kết quả.' : 'Chưa có dữ liệu.'}
+                      </div>
+                    )}
                   </div>
+
+                  {/* Pagination Controls */}
+                  {totalOrderPages > 1 && (
+                    <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                      <div className="text-[10px] text-slate-400 font-medium">Trang {orderCurrentPage} / {totalOrderPages}</div>
+                      <div className="flex items-center gap-1">
+                        <button 
+                          disabled={orderCurrentPage === 1}
+                          onClick={() => setOrderCurrentPage(prev => Math.max(1, prev - 1))}
+                          className="p-1.5 rounded bg-white border border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 transition-all"
+                        >
+                          <ChevronLeft size={14} />
+                        </button>
+                        
+                        {/* Hiển thị 3 trang xung quanh trang hiện tại nếu cần, ở đây đơn giản là các số trang */}
+                        {[...Array(totalOrderPages)].map((_, i) => (
+                          <button
+                            key={i}
+                            onClick={() => setOrderCurrentPage(i + 1)}
+                            className={`w-7 h-7 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${orderCurrentPage === i + 1 ? 'bg-emerald-500 border-emerald-500 text-white' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                          >
+                            {i + 1}
+                          </button>
+                        ))}
+
+                        <button 
+                          disabled={orderCurrentPage === totalOrderPages}
+                          onClick={() => setOrderCurrentPage(prev => Math.min(totalOrderPages, prev + 1))}
+                          className="p-1.5 rounded bg-white border border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 transition-all"
+                        >
+                          <ChevronRight size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
