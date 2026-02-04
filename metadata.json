@@ -1,0 +1,5 @@
+{
+  "name": "FoodOrder Pro - Quản lý Đặt Món",
+  "description": "Ứng dụng quản lý thực đơn và danh sách đặt món ăn chuyên nghiệp, hỗ trợ tính toán doanh thu và xuất nhập dữ liệu file Excel.",
+  "requestFramePermissions": []
+}

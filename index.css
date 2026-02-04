@@ -1,0 +1,48 @@
+
+body {
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Scrollbar cho danh sách món ăn */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+/* Custom Scrollbar cho giỏ hàng (nền tối) */
+.custom-scrollbar-dark::-webkit-scrollbar {
+  width: 4px;
+}
+
+.custom-scrollbar-dark::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+.custom-scrollbar-dark::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 10px;
+}
+
+.custom-scrollbar-dark::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Hiệu ứng chuyển cảnh đơn giản */
+.animate-in {
+  animation-duration: 400ms;
+  animation-fill-mode: both;
+}
