@@ -1,5 +1,6 @@
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { 
   Utensils, 
   Users, 
@@ -9,6 +10,7 @@ import {
   Edit2,
   X,
   Download, 
+  Upload,
   ChevronRight,
   ChevronLeft,
   TrendingUp,
@@ -20,25 +22,25 @@ import {
   ClipboardList,
   Database,
   RefreshCw,
-  Link as LinkIcon
+  AlertCircle
 } from 'lucide-react';
 import { FoodItem, Order, OrderItem, ViewType } from './types';
-import { exportToExcel, generateExcelBuffer, parseExcelData } from './services/excelService';
+import { exportToExcel, parseExcelData } from './services/excelService';
+import { db } from './services/db';
 
-const LOCAL_STORAGE_KEY = 'food_order_app_data_v4';
+const LOCAL_STORAGE_KEY = 'food_order_app_db_v5';
 const ORDERS_PER_PAGE = 5;
 
 export default function App() {
   const [view, setView] = useState<ViewType>('dashboard');
-  const [foods, setFoods] = useState<FoodItem[]>([]);
-  const [orders, setOrders] = useState<Order[]>([]);
+  
+  // Database Queries (Reactive - tự động cập nhật khi DB thay đổi)
+  const foods = useLiveQuery(() => db.foods.toArray()) || [];
+  const orders = useLiveQuery(() => db.orders.orderBy('orderDate').reverse().toArray()) || [];
+  
   const [searchTerm, setSearchTerm] = useState('');
   const [orderSearchTerm, setOrderSearchTerm] = useState('');
   
-  // File System State
-  const [fileHandle, setFileHandle] = useState<any | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-
   // Form states
   const [foodForm, setFoodForm] = useState({ name: '', price: '' });
   const [orderCustomerName, setOrderCustomerName] = useState('');
@@ -48,87 +50,61 @@ export default function App() {
   // Pagination state
   const [orderCurrentPage, setOrderCurrentPage] = useState(1);
 
-  // 1. Load Initial Data from LocalStorage
+  // MIGRATION: Chuyển dữ liệu từ LocalStorage sang IndexedDB trong lần đầu sử dụng
   useEffect(() => {
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) {
-      try {
-        const { foods, orders } = JSON.parse(saved);
-        setFoods(foods || []);
-        setOrders(orders || []);
-      } catch (e) {
-        console.error("Lỗi khi tải dữ liệu LocalStorage", e);
-      }
-    }
-  }, []);
-
-  // 2. Persist to LocalStorage whenever state changes
-  useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ foods, orders }));
-  }, [foods, orders]);
-
-  // 3. Auto-Save to connected File Handle
-  const saveToFile = useCallback(async (currentFoods: FoodItem[], currentOrders: Order[]) => {
-    if (!fileHandle) return;
-    
-    setIsSyncing(true);
-    try {
-      const options = { mode: 'readwrite' as any };
-      if ((await fileHandle.queryPermission(options)) !== 'granted') {
-        if ((await fileHandle.requestPermission(options)) !== 'granted') {
-          alert("Không có quyền ghi vào file. Vui lòng cấp quyền.");
-          return;
+    const migrateData = async () => {
+      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (saved) {
+        try {
+          const { foods: sFoods, orders: sOrders } = JSON.parse(saved);
+          
+          // Chỉ migrate nếu Database đang trống
+          const foodCount = await db.foods.count();
+          if (foodCount === 0) {
+            if (sFoods?.length) await db.foods.bulkAdd(sFoods);
+            if (sOrders?.length) await db.orders.bulkAdd(sOrders);
+            console.log("Đã chuyển đổi dữ liệu từ LocalStorage sang Database thành công!");
+          }
+          // Sau khi migrate xong hoặc nếu đã có data, ta có thể xóa LS để giải phóng bộ nhớ (tùy chọn)
+          // localStorage.removeItem(LOCAL_STORAGE_KEY);
+        } catch (e) {
+          console.error("Lỗi khi migrate dữ liệu", e);
         }
       }
+    };
+    migrateData();
+  }, []);
 
-      const buffer = generateExcelBuffer(currentFoods, currentOrders);
-      const writable = await fileHandle.createWritable();
-      await writable.write(buffer);
-      await writable.close();
-      console.log("Đã tự động lưu vào file Excel.");
-    } catch (err) {
-      console.error("Lỗi khi lưu vào file:", err);
-    } finally {
-      setIsSyncing(false);
-    }
-  }, [fileHandle]);
+  // Handle Excel Import
+  const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  // Trigger file save on data change if connected
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (fileHandle) saveToFile(foods, orders);
-    }, 1000); // Debounce save
-    return () => clearTimeout(timer);
-  }, [foods, orders, fileHandle, saveToFile]);
-
-  // Connect to a file
-  const connectFile = async () => {
-    try {
-      const [handle] = await (window as any).showOpenFilePicker({
-        types: [{
-          description: 'Excel Files',
-          accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
-        }],
-        multiple: false
-      });
-
-      const file = await handle.getFile();
-      const buffer = await file.arrayBuffer();
-      const { foods: newFoods, orders: newOrders } = await parseExcelData(buffer);
-      
-      setFileHandle(handle);
-      setFoods(newFoods);
-      setOrders(newOrders);
-      alert(`Đã kết nối và đồng bộ với file: ${file.name}`);
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        alert("Trình duyệt của bạn có thể không hỗ trợ tính năng kết nối file trực tiếp hoặc đã xảy ra lỗi.");
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const buffer = evt.target?.result;
+        const { foods: newFoods, orders: newOrders } = await parseExcelData(buffer);
+        
+        if (confirm(`Nạp dữ liệu từ Excel? (Dữ liệu hiện tại trong Database sẽ bị thay thế)`)) {
+          await db.transaction('rw', db.foods, db.orders, async () => {
+            await db.foods.clear();
+            await db.orders.clear();
+            await db.foods.bulkAdd(newFoods);
+            await db.orders.bulkAdd(newOrders);
+          });
+          alert("Nạp dữ liệu thành công!");
+        }
+      } catch (err) {
+        alert("Lỗi: File Excel không đúng định dạng.");
       }
-    }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = ''; 
   };
 
-  // Actions
-  const addFood = (e: React.FormEvent) => {
+  // Food Actions
+  const addFood = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!foodForm.name || !foodForm.price) return;
     const newFood: FoodItem = {
@@ -136,42 +112,30 @@ export default function App() {
       name: foodForm.name,
       price: parseFloat(foodForm.price)
     };
-    setFoods([...foods, newFood]);
+    await db.foods.add(newFood);
     setFoodForm({ name: '', price: '' });
   };
 
-  const removeFood = (id: string) => {
+  const removeFood = async (id: string) => {
     if (confirm("Xóa món ăn này khỏi thực đơn?")) {
-      setFoods(foods.filter(f => f.id !== id));
-      const newDraft = { ...draftQuantities };
-      delete newDraft[id];
-      setDraftQuantities(newDraft);
+      await db.foods.delete(id);
     }
   };
 
+  // Order Actions
   const updateDraftQuantity = (foodId: string, delta: number) => {
-    setDraftQuantities(prev => {
-      const current = prev[foodId] || 0;
-      const next = Math.max(0, current + delta);
-      return { ...prev, [foodId]: next };
-    });
-  };
-
-  const setManualQuantity = (foodId: string, value: string) => {
-    const qty = parseInt(value) || 0;
-    setDraftQuantities(prev => ({ ...prev, [foodId]: Math.max(0, qty) }));
+    setDraftQuantities(prev => ({
+      ...prev,
+      [foodId]: Math.max(0, (prev[foodId] || 0) + delta)
+    }));
   };
 
   const startEditOrder = (order: Order) => {
     setEditingOrderId(order.id);
     setOrderCustomerName(order.customerName);
-    
     const newDraft: Record<string, number> = {};
-    order.items.forEach(item => {
-      newDraft[item.foodId] = item.quantity;
-    });
+    order.items.forEach(item => { newDraft[item.foodId] = item.quantity; });
     setDraftQuantities(newDraft);
-    
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -181,30 +145,20 @@ export default function App() {
     setDraftQuantities({});
   };
 
-  const addOrder = (e: React.FormEvent) => {
+  const saveOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     const items: OrderItem[] = (Object.entries(draftQuantities) as [string, number][])
       .filter(([_, qty]) => qty > 0)
       .map(([foodId, quantity]) => ({ foodId, quantity }));
 
-    if (!orderCustomerName) {
-      alert("Vui lòng nhập tên khách hàng.");
+    if (!orderCustomerName || items.length === 0) {
+      alert("Vui lòng điền đủ tên khách và chọn món.");
       return;
     }
-    if (items.length === 0) {
-      alert("Vui lòng chọn ít nhất một món ăn.");
-      return;
-    }
-    
+
     if (editingOrderId) {
-      setOrders(orders.map(o => o.id === editingOrderId ? {
-        ...o,
-        customerName: orderCustomerName,
-        items,
-        orderDate: o.orderDate
-      } : o));
+      await db.orders.update(editingOrderId, { customerName: orderCustomerName, items });
       setEditingOrderId(null);
-      alert("Đơn hàng đã được cập nhật!");
     } else {
       const newOrder: Order = {
         id: Math.random().toString(36).substr(2, 9),
@@ -212,17 +166,15 @@ export default function App() {
         items,
         orderDate: new Date().toLocaleString('vi-VN')
       };
-      setOrders([...orders, newOrder]);
-      alert("Đơn hàng đã được lưu!");
+      await db.orders.add(newOrder);
     }
-    
     setOrderCustomerName('');
     setDraftQuantities({});
   };
 
-  const removeOrder = (id: string) => {
-    if (confirm("Xác nhận xóa đơn hàng này?")) {
-      setOrders(orders.filter(o => o.id !== id));
+  const removeOrder = async (id: string) => {
+    if (confirm("Xóa đơn hàng này?")) {
+      await db.orders.delete(id);
       if (editingOrderId === id) cancelEdit();
     }
   };
@@ -235,36 +187,16 @@ export default function App() {
     }, 0);
   };
 
-  const draftTotal = useMemo(() => {
-    return (Object.entries(draftQuantities) as [string, number][]).reduce((sum, [foodId, qty]) => {
-      const food = foods.find(f => f.id === foodId);
-      return sum + (food ? food.price * qty : 0);
-    }, 0);
-  }, [draftQuantities, foods]);
-
   const totalRevenue = orders.reduce((sum, order) => sum + getOrderTotal(order), 0);
-  const totalItemsCount = orders.reduce((sum, order) => 
-    sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0);
-
+  
+  // Filtering & Pagination
   const filteredFoods = foods.filter(f => f.name.toLowerCase().includes(searchTerm.toLowerCase()));
-
-  // Order List Logic (Filter + Pagination)
   const filteredOrdersList = useMemo(() => {
-    const list = orders.slice().reverse();
-    if (!orderSearchTerm) return list;
-    return list.filter(o => o.customerName.toLowerCase().includes(orderSearchTerm.toLowerCase()));
+    return orderSearchTerm ? orders.filter(o => o.customerName.toLowerCase().includes(orderSearchTerm.toLowerCase())) : orders;
   }, [orders, orderSearchTerm]);
 
   const totalOrderPages = Math.ceil(filteredOrdersList.length / ORDERS_PER_PAGE);
-  const paginatedOrders = useMemo(() => {
-    const start = (orderCurrentPage - 1) * ORDERS_PER_PAGE;
-    return filteredOrdersList.slice(start, start + ORDERS_PER_PAGE);
-  }, [filteredOrdersList, orderCurrentPage]);
-
-  // Reset page when searching
-  useEffect(() => {
-    setOrderCurrentPage(1);
-  }, [orderSearchTerm]);
+  const paginatedOrders = filteredOrdersList.slice((orderCurrentPage - 1) * ORDERS_PER_PAGE, orderCurrentPage * ORDERS_PER_PAGE);
 
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-slate-50">
@@ -279,42 +211,37 @@ export default function App() {
           </h1>
         </div>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-1">
           <SidebarLink active={view === 'dashboard'} onClick={() => setView('dashboard')} icon={<LayoutDashboard size={20}/>} label="Tổng quan" />
           <SidebarLink active={view === 'food-management'} onClick={() => setView('food-management')} icon={<Utensils size={20}/>} label="Thực đơn" />
           <SidebarLink active={view === 'order-management'} onClick={() => setView('order-management')} icon={<Users size={20}/>} label="Đặt món" />
         </div>
 
-        {/* Database Sync Section */}
+        {/* Database Management Section */}
         <div className="mt-auto p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
-          <div className="flex items-center justify-between">
-            <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
-              <Database size={12} /> Database Sync
-            </h4>
-            {isSyncing && <RefreshCw size={12} className="text-emerald-500 animate-spin" />}
-          </div>
+          <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1">
+            <Database size={12} /> CƠ SỞ DỮ LIỆU (SQL)
+          </h4>
           
-          {fileHandle ? (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-xs text-emerald-600 font-bold bg-emerald-50 p-2 rounded-lg border border-emerald-100">
-                <LinkIcon size={14} /> Tự động đồng bộ
-              </div>
-              <p className="text-[10px] text-slate-500 truncate italic px-1">File: {fileHandle.name}</p>
-              <button onClick={() => setFileHandle(null)} className="w-full py-1.5 text-[10px] text-rose-500 font-bold hover:bg-rose-50 rounded-lg transition-colors border border-rose-100">Ngắt kết nối file</button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-[10px] text-slate-500 leading-relaxed px-1 italic">Dữ liệu hiện tại chỉ lưu trên trình duyệt.</p>
-              <button onClick={connectFile} className="w-full py-2.5 bg-emerald-500 text-white text-xs font-bold rounded-xl hover:bg-emerald-600 shadow-md transition-all flex items-center justify-center gap-2">
-                <LinkIcon size={14} /> Kết nối File Excel
-              </button>
-            </div>
-          )}
-
-          <div className="pt-2 border-t border-slate-200">
-             <button onClick={() => exportToExcel(foods, orders)} className="w-full flex items-center justify-center gap-2 py-2 text-xs text-slate-600 hover:bg-white rounded-lg transition-all font-medium border border-transparent hover:border-slate-200">
-              <Download size={14} /> Tải bản sao Excel
+          <div className="space-y-2">
+            <button 
+              onClick={() => exportToExcel(foods, orders)}
+              className="w-full flex items-center justify-center gap-2 py-2.5 bg-white border border-slate-200 text-xs font-bold text-slate-700 rounded-xl hover:bg-slate-100 transition-all shadow-sm"
+            >
+              <Download size={14} className="text-emerald-500" /> Xuất file Excel
             </button>
+            
+            <label className="w-full flex items-center justify-center gap-2 py-2.5 bg-white border border-slate-200 text-xs font-bold text-slate-700 rounded-xl hover:bg-slate-100 transition-all shadow-sm cursor-pointer">
+              <Upload size={14} className="text-blue-500" /> Nhập từ Excel
+              <input type="file" accept=".xlsx" className="hidden" onChange={handleImportExcel} />
+            </label>
+          </div>
+
+          <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-100">
+            <div className="flex items-center gap-2 text-[10px] text-emerald-700 font-bold mb-1">
+              <RefreshCw size={10} className="animate-spin-slow" /> DATABASE ACTIVE
+            </div>
+            <p className="text-[9px] text-emerald-600 leading-tight">Dữ liệu được quản lý bởi IndexedDB công nghệ cao.</p>
           </div>
         </div>
       </nav>
@@ -324,59 +251,50 @@ export default function App() {
         {view === 'dashboard' && (
           <div className="space-y-8 animate-in fade-in duration-500">
             <header>
-              <h2 className="text-3xl font-bold text-slate-800">Báo cáo hôm nay</h2>
-              <p className="text-slate-500">Tình hình doanh thu và số lượng đơn hàng hiện tại.</p>
+              <h2 className="text-3xl font-bold text-slate-800">Thống kê chung</h2>
+              <p className="text-slate-500">Toàn bộ dữ liệu được lưu trữ trong Database trình duyệt.</p>
             </header>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <StatCard title="Doanh thu" value={`${totalRevenue.toLocaleString()}đ`} icon={<DollarSign className="text-emerald-500" />} color="bg-emerald-50" />
-              <StatCard title="Đơn hàng" value={orders.length.toString()} icon={<ShoppingBag className="text-blue-500" />} color="bg-blue-50" />
-              <StatCard title="Tổng phần ăn" value={totalItemsCount.toString()} icon={<TrendingUp className="text-orange-500" />} color="bg-orange-50" />
+              <StatCard title="Tổng đơn" value={orders.length.toString()} icon={<ShoppingBag className="text-blue-500" />} color="bg-blue-50" />
+              <StatCard title="Món ăn" value={foods.length.toString()} icon={<Utensils className="text-orange-500" />} color="bg-orange-50" />
             </div>
 
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center">
-                <h3 className="font-bold text-lg">Giao dịch gần đây</h3>
-                <button onClick={() => setView('order-management')} className="text-emerald-600 text-sm font-semibold flex items-center hover:underline">
-                  Xem tất cả <ChevronRight size={16} />
-                </button>
+              <div className="p-6 border-b border-slate-100">
+                <h3 className="font-bold text-lg">Hoạt động gần đây</h3>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
-                  <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+                  <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
                     <tr>
                       <th className="px-6 py-4">Khách hàng</th>
-                      <th className="px-6 py-4">Chi tiết món</th>
-                      <th className="px-6 py-4 text-right">Tổng thanh toán</th>
+                      <th className="px-6 py-4">Sản phẩm</th>
+                      <th className="px-6 py-4 text-right">Tổng cộng</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {orders.slice(-5).reverse().map(order => (
-                      <tr key={order.id} className="hover:bg-slate-50 transition-colors">
+                    {orders.slice(0, 5).map(order => (
+                      <tr key={order.id} className="hover:bg-slate-50">
                         <td className="px-6 py-4">
-                           <div className="font-semibold text-slate-800">{order.customerName}</div>
-                           <div className="text-[10px] text-slate-400">{order.orderDate}</div>
+                          <div className="font-bold">{order.customerName}</div>
+                          <div className="text-[10px] text-slate-400">{order.orderDate}</div>
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-wrap gap-1">
-                            {order.items.map((item, idx) => {
-                              const food = foods.find(f => f.id === item.foodId);
-                              return (
-                                <span key={idx} className="inline-block px-2 py-0.5 bg-slate-100 text-slate-600 text-xs rounded-md border border-slate-200">
-                                  {food?.name} x{item.quantity}
-                                </span>
-                              );
-                            })}
+                            {order.items.map((it, idx) => (
+                              <span key={idx} className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                                {foods.find(f => f.id === it.foodId)?.name} x{it.quantity}
+                              </span>
+                            ))}
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-right font-bold text-emerald-600">
+                        <td className="px-6 py-4 text-right font-black text-emerald-600">
                           {getOrderTotal(order).toLocaleString()}đ
                         </td>
                       </tr>
                     ))}
-                    {orders.length === 0 && (
-                      <tr><td colSpan={3} className="px-6 py-12 text-center text-slate-400 italic">Chưa có đơn hàng nào.</td></tr>
-                    )}
                   </tbody>
                 </table>
               </div>
@@ -385,46 +303,44 @@ export default function App() {
         )}
 
         {view === 'food-management' && (
-          <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
+          <div className="space-y-8 animate-in slide-in-from-bottom-4">
             <header>
-              <h2 className="text-3xl font-bold text-slate-800">Quản lý thực đơn</h2>
-              <p className="text-slate-500">Thiết lập danh sách món ăn và giá bán.</p>
+              <h2 className="text-3xl font-bold text-slate-800">Quản lý Thực đơn</h2>
             </header>
-
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 h-fit">
-                <h3 className="font-bold text-lg mb-6 flex items-center gap-2">
-                  <Plus size={20} className="text-emerald-500" /> Thêm món mới
-                </h3>
-                <form onSubmit={addFood} className="space-y-5">
-                  <FormField label="Tên món ăn" value={foodForm.name} onChange={v => setFoodForm({...foodForm, name: v})} placeholder="Ví dụ: Phở bò" />
-                  <FormField label="Giá bán (VNĐ)" type="number" value={foodForm.price} onChange={v => setFoodForm({...foodForm, price: v})} placeholder="Ví dụ: 45000" />
-                  <button type="submit" className="w-full py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 shadow-lg shadow-emerald-100 transition-all active:scale-95">Lưu món ăn</button>
+                <h3 className="font-bold text-lg mb-6 flex items-center gap-2"><Plus size={18} /> Thêm món</h3>
+                <form onSubmit={addFood} className="space-y-4">
+                  <FormField label="Tên món" value={foodForm.name} onChange={v => setFoodForm({...foodForm, name: v})} placeholder="Phở bò..." />
+                  <FormField label="Giá bán" type="number" value={foodForm.price} onChange={v => setFoodForm({...foodForm, price: v})} placeholder="45000" />
+                  <button className="w-full py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-all">Lưu món ăn</button>
                 </form>
               </div>
-
-              <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold">
+              <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="p-4 border-b border-slate-100">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="text" placeholder="Tìm tên món..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-slate-50 border-none rounded-lg text-sm outline-none" />
+                  </div>
+                </div>
+                <table className="w-full">
+                  <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-400">
                     <tr>
-                      <th className="px-6 py-4">Tên món</th>
-                      <th className="px-6 py-4 text-right">Đơn giá</th>
-                      <th className="px-6 py-4 text-center">Xóa</th>
+                      <th className="px-6 py-3 text-left">Tên món</th>
+                      <th className="px-6 py-3 text-right">Giá</th>
+                      <th className="px-6 py-3 text-center w-16">Hành động</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {foods.map(food => (
-                      <tr key={food.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="px-6 py-4 font-semibold text-slate-800">{food.name}</td>
-                        <td className="px-6 py-4 text-right font-mono font-bold text-slate-600">{food.price.toLocaleString()}đ</td>
+                    {filteredFoods.map(f => (
+                      <tr key={f.id} className="hover:bg-slate-50">
+                        <td className="px-6 py-4 font-bold">{f.name}</td>
+                        <td className="px-6 py-4 text-right font-mono text-emerald-600">{f.price.toLocaleString()}đ</td>
                         <td className="px-6 py-4 text-center">
-                          <button onClick={() => removeFood(food.id)} className="p-2 text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"><Trash2 size={18} /></button>
+                          <button onClick={() => removeFood(f.id)} className="text-slate-300 hover:text-rose-500"><Trash2 size={16}/></button>
                         </td>
                       </tr>
                     ))}
-                    {foods.length === 0 && (
-                      <tr><td colSpan={3} className="px-6 py-12 text-center text-slate-400">Chưa có món nào.</td></tr>
-                    )}
                   </tbody>
                 </table>
               </div>
@@ -433,189 +349,101 @@ export default function App() {
         )}
 
         {view === 'order-management' && (
-          <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-            <header>
-              <h2 className="text-3xl font-bold text-slate-800">Đặt món ngay</h2>
-              <p className="text-slate-500">Chọn tên khách hàng và tùy chỉnh số lượng món ăn.</p>
+          <div className="space-y-8 animate-in slide-in-from-bottom-4">
+             <header>
+              <h2 className="text-3xl font-bold text-slate-800">Đặt món & Quản lý đơn</h2>
             </header>
-
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+              {/* Form Order */}
               <div className="lg:col-span-3 space-y-6">
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                  <div className="flex flex-col md:flex-row gap-4 mb-6">
-                    <div className="flex-1">
-                      <FormField label="Tên khách hàng" value={orderCustomerName} onChange={setOrderCustomerName} placeholder="Nhập tên người đặt..." />
-                    </div>
-                    <div className="md:w-64">
-                      <label className="block text-sm font-bold text-slate-700 mb-1.5">Tìm món ăn</label>
-                      <div className="relative">
-                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                        <input type="text" placeholder="Tìm nhanh..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none text-sm transition-all" />
-                      </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <FormField label="Tên khách hàng" value={orderCustomerName} onChange={setOrderCustomerName} placeholder="Nhập tên..." />
+                    <div className="relative pt-6">
+                      <Search className="absolute left-3 top-[70%] -translate-y-1/2 text-slate-400" size={16} />
+                      <input type="text" placeholder="Tìm món nhanh..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 outline-none focus:ring-2 focus:ring-emerald-500 text-sm" />
                     </div>
                   </div>
-
-                  <div className="space-y-3">
-                    <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider">Danh sách món ăn</h3>
-                    <div className="grid grid-cols-1 gap-3 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                      {filteredFoods.map(food => {
-                        const qty = draftQuantities[food.id] || 0;
-                        return (
-                          <div key={food.id} className={`flex items-center justify-between p-4 rounded-xl border transition-all ${qty > 0 ? 'bg-emerald-50 border-emerald-200 shadow-sm' : 'bg-white border-slate-100'}`}>
-                            <div className="flex-1">
-                              <div className="font-bold text-slate-800">{food.name}</div>
-                              <div className="text-sm text-emerald-600 font-semibold">{food.price.toLocaleString()}đ</div>
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <button type="button" onClick={() => updateDraftQuantity(food.id, -1)} className={`p-1.5 rounded-lg border transition-all ${qty > 0 ? 'bg-white border-emerald-200 text-emerald-600 hover:bg-emerald-100' : 'bg-slate-50 border-slate-200 text-slate-300 cursor-not-allowed'}`}><Minus size={18} /></button>
-                              <input type="number" min="0" value={qty === 0 ? '' : qty} onChange={e => setManualQuantity(food.id, e.target.value)} placeholder="0" className="w-12 text-center font-bold bg-transparent outline-none text-lg text-slate-800" />
-                              <button type="button" onClick={() => updateDraftQuantity(food.id, 1)} className="p-1.5 rounded-lg border bg-white border-emerald-200 text-emerald-600 hover:bg-emerald-100 transition-all"><Plus size={18} /></button>
-                            </div>
+                  <div className="grid grid-cols-1 gap-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                    {filteredFoods.map(f => {
+                      const qty = draftQuantities[f.id] || 0;
+                      return (
+                        <div key={f.id} className={`flex items-center justify-between p-3 rounded-xl border transition-all ${qty > 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-slate-100'}`}>
+                          <div className="font-bold text-sm">{f.name} <span className="block text-xs font-medium text-emerald-600">{f.price.toLocaleString()}đ</span></div>
+                          <div className="flex items-center gap-3">
+                            <button onClick={() => updateDraftQuantity(f.id, -1)} className="p-1 border rounded-lg hover:bg-white"><Minus size={14}/></button>
+                            <span className="w-6 text-center font-bold text-sm">{qty}</span>
+                            <button onClick={() => updateDraftQuantity(f.id, 1)} className="p-1 border rounded-lg hover:bg-white"><Plus size={14}/></button>
                           </div>
-                        );
-                      })}
-                    </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               </div>
 
+              {/* Order Summary & List */}
               <div className="lg:col-span-2 space-y-6">
-                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl shadow-slate-200 relative">
-                  {editingOrderId && (
-                    <div className="absolute -top-3 left-6 px-3 py-1 bg-amber-500 text-slate-900 text-[10px] font-black rounded-full shadow-lg flex items-center gap-1 animate-bounce">
-                      <Edit2 size={10} /> ĐANG CHỈNH SỬA ĐƠN
-                    </div>
-                  )}
-                  
-                  <div className="flex items-center justify-between mb-6">
-                    <div className="flex items-center gap-2">
-                      <ShoppingCart size={20} className="text-emerald-400" />
-                      <h3 className="font-bold text-lg">Xác nhận đơn hàng</h3>
-                    </div>
-                    {editingOrderId && (
-                      <button onClick={cancelEdit} className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-lg transition-colors flex items-center gap-1 text-[10px] font-bold">
-                        <X size={12} /> HỦY
-                      </button>
-                    )}
+                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden">
+                  {editingOrderId && <div className="absolute top-0 right-0 bg-amber-500 text-slate-900 text-[9px] font-black px-3 py-1 rounded-bl-lg">ĐANG SỬA</div>}
+                  <h3 className="font-bold mb-4 flex items-center gap-2"><ShoppingCart size={18} className="text-emerald-400" /> Xác nhận đơn</h3>
+                  <div className="space-y-2 mb-6 min-h-[100px] max-h-[200px] overflow-y-auto custom-scrollbar-dark pr-2">
+                    {(Object.entries(draftQuantities) as [string, number][]).map(([id, qty]) => qty > 0 && (
+                      <div key={id} className="flex justify-between text-xs border-b border-slate-800 pb-2">
+                        <span>{foods.find(f => f.id === id)?.name} x{qty}</span>
+                        <span className="font-bold text-emerald-400">{( (foods.find(f => f.id === id)?.price || 0) * qty).toLocaleString()}đ</span>
+                      </div>
+                    ))}
                   </div>
-
-                  <div className="space-y-4 mb-6 min-h-[100px] max-h-[300px] overflow-y-auto pr-2 custom-scrollbar-dark">
-                    {(Object.entries(draftQuantities) as [string, number][]).some(([_, qty]) => qty > 0) ? (
-                      (Object.entries(draftQuantities) as [string, number][]).map(([foodId, qty]) => {
-                        if (qty === 0) return null;
-                        const food = foods.find(f => f.id === foodId);
-                        return (
-                          <div key={foodId} className="flex justify-between items-center text-sm border-b border-slate-800 pb-3">
-                            <div>
-                              <div className="font-semibold">{food?.name}</div>
-                              <div className="text-slate-400 text-xs">{food?.price.toLocaleString()}đ x {qty}</div>
-                            </div>
-                            <div className="font-bold text-emerald-400">{((food?.price || 0) * qty).toLocaleString()}đ</div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="text-center py-6 text-slate-500 italic text-sm">Chưa chọn món nào...</div>
-                    )}
+                  <div className="flex justify-between items-center mb-6">
+                    <span className="text-slate-400 text-sm">Tổng thanh toán:</span>
+                    <span className="text-2xl font-black text-emerald-400">{draftTotal(draftQuantities, foods).toLocaleString()}đ</span>
                   </div>
-
-                  <div className="flex justify-between items-center mb-6 pt-2">
-                    <span className="text-slate-400 font-medium">Tổng thanh toán:</span>
-                    <span className="text-2xl font-black text-emerald-400">{draftTotal.toLocaleString()}đ</span>
+                  <div className="flex gap-2">
+                    {editingOrderId && <button onClick={cancelEdit} className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 font-bold rounded-xl text-xs">HỦY</button>}
+                    <button onClick={saveOrder} className={`flex-[2] py-3 font-bold rounded-xl text-xs transition-all ${editingOrderId ? 'bg-amber-500 text-slate-900' : 'bg-emerald-500 text-white hover:bg-emerald-600'}`}>
+                      {editingOrderId ? 'CẬP NHẬT ĐƠN' : 'LƯU ĐƠN HÀNG'}
+                    </button>
                   </div>
-
-                  <button 
-                    onClick={addOrder} 
-                    disabled={!orderCustomerName || draftTotal === 0} 
-                    className={`w-full py-4 font-bold rounded-xl transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed active:scale-[0.98] ${editingOrderId ? 'bg-amber-500 hover:bg-amber-600 text-slate-900' : 'bg-emerald-500 hover:bg-emerald-600 text-white'}`}
-                  >
-                    {editingOrderId ? 'CẬP NHẬT ĐƠN HÀNG' : 'HOÀN TẤT ĐẶT MÓN'}
-                  </button>
                 </div>
 
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col max-h-[650px]">
-                  <div className="p-4 border-b border-slate-100 bg-slate-50 flex flex-col gap-3">
-                    <h4 className="font-bold text-slate-700 text-sm flex items-center gap-2">
-                      <ClipboardList size={16} className="text-emerald-600" /> Đơn đặt hàng
-                    </h4>
+                {/* Paginated Order List */}
+                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[500px]">
+                  <div className="p-4 bg-slate-50 border-b border-slate-100 space-y-3">
+                    <h4 className="text-xs font-bold text-slate-700 flex items-center gap-2"><ClipboardList size={14} /> Đơn đặt hàng</h4>
                     <div className="relative">
-                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                      <input 
-                        type="text" 
-                        placeholder="Tìm theo tên khách..." 
-                        value={orderSearchTerm}
-                        onChange={e => setOrderSearchTerm(e.target.value)}
-                        className="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none text-xs transition-all"
-                      />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      <input type="text" placeholder="Tìm khách..." value={orderSearchTerm} onChange={e => setOrderSearchTerm(e.target.value)} className="w-full pl-9 pr-4 py-1.5 bg-white border border-slate-200 rounded-lg text-xs outline-none focus:ring-1 focus:ring-emerald-500" />
                     </div>
                   </div>
-                  
-                  <div className="divide-y divide-slate-100 overflow-y-auto flex-1 custom-scrollbar">
-                    {paginatedOrders.map(order => (
-                      <div key={order.id} className={`p-4 hover:bg-slate-50 transition-colors relative group border-l-4 ${editingOrderId === order.id ? 'bg-amber-50/30 border-l-amber-500' : 'border-l-transparent hover:border-l-emerald-500'}`}>
-                        <div className="absolute right-3 top-3 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                          <button onClick={() => startEditOrder(order)} className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-md transition-colors"><Edit2 size={14} /></button>
-                          <button onClick={() => removeOrder(order.id)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"><Trash2 size={14} /></button>
+                  <div className="overflow-y-auto flex-1 divide-y divide-slate-100 custom-scrollbar">
+                    {paginatedOrders.map(o => (
+                      <div key={o.id} className={`p-4 hover:bg-slate-50 group relative border-l-4 ${editingOrderId === o.id ? 'border-amber-500 bg-amber-50/20' : 'border-transparent hover:border-emerald-500'}`}>
+                        <div className="absolute right-2 top-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                          <button onClick={() => startEditOrder(o)} className="p-1.5 text-amber-600 hover:bg-amber-50 rounded"><Edit2 size={12}/></button>
+                          <button onClick={() => removeOrder(o.id)} className="p-1.5 text-rose-600 hover:bg-rose-50 rounded"><Trash2 size={12}/></button>
                         </div>
-                        
-                        <div className="flex justify-between items-start mb-2 pr-16">
-                          <div className="flex-1 min-w-0">
-                            <div className="font-bold text-slate-900 leading-tight truncate">{order.customerName}</div>
-                            <div className="text-[9px] text-slate-400 mt-0.5">{order.orderDate}</div>
-                          </div>
-                          <div className="text-xs font-black text-emerald-600 whitespace-nowrap">{getOrderTotal(order).toLocaleString()}đ</div>
+                        <div className="flex justify-between mb-2 pr-12">
+                          <div className="font-bold text-xs truncate max-w-[120px]">{o.customerName}</div>
+                          <div className="text-[10px] font-black text-emerald-600">{getOrderTotal(o).toLocaleString()}đ</div>
                         </div>
                         <div className="flex flex-wrap gap-1">
-                          {order.items.map((item, idx) => {
-                            const food = foods.find(f => f.id === item.foodId);
-                            return (
-                              <span key={idx} className="text-[10px] text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
-                                {food?.name || 'Đã xóa'} x{item.quantity}
-                              </span>
-                            );
-                          })}
+                          {o.items.map((it, idx) => (
+                             <span key={idx} className="text-[9px] bg-slate-50 border border-slate-100 px-1 py-0.5 rounded text-slate-500">
+                               {foods.find(f => f.id === it.foodId)?.name} x{it.quantity}
+                             </span>
+                          ))}
                         </div>
                       </div>
                     ))}
-                    {filteredOrdersList.length === 0 && (
-                      <div className="p-12 text-center text-slate-300 text-sm italic">
-                        {orderSearchTerm ? 'Không tìm thấy kết quả.' : 'Chưa có dữ liệu.'}
-                      </div>
-                    )}
+                    {filteredOrdersList.length === 0 && <div className="p-8 text-center text-slate-300 text-xs italic">Chưa có đơn hàng.</div>}
                   </div>
-
-                  {/* Pagination Controls */}
+                  {/* Pagination */}
                   {totalOrderPages > 1 && (
-                    <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
-                      <div className="text-[10px] text-slate-400 font-medium">Trang {orderCurrentPage} / {totalOrderPages}</div>
-                      <div className="flex items-center gap-1">
-                        <button 
-                          disabled={orderCurrentPage === 1}
-                          onClick={() => setOrderCurrentPage(prev => Math.max(1, prev - 1))}
-                          className="p-1.5 rounded bg-white border border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 transition-all"
-                        >
-                          <ChevronLeft size={14} />
-                        </button>
-                        
-                        {/* Hiển thị 3 trang xung quanh trang hiện tại nếu cần, ở đây đơn giản là các số trang */}
-                        {[...Array(totalOrderPages)].map((_, i) => (
-                          <button
-                            key={i}
-                            onClick={() => setOrderCurrentPage(i + 1)}
-                            className={`w-7 h-7 flex items-center justify-center rounded text-[10px] font-bold border transition-all ${orderCurrentPage === i + 1 ? 'bg-emerald-500 border-emerald-500 text-white' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}
-                          >
-                            {i + 1}
-                          </button>
-                        ))}
-
-                        <button 
-                          disabled={orderCurrentPage === totalOrderPages}
-                          onClick={() => setOrderCurrentPage(prev => Math.min(totalOrderPages, prev + 1))}
-                          className="p-1.5 rounded bg-white border border-slate-200 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-30 transition-all"
-                        >
-                          <ChevronRight size={14} />
-                        </button>
-                      </div>
+                    <div className="p-2 border-t border-slate-100 flex items-center justify-between bg-slate-50">
+                      <button disabled={orderCurrentPage === 1} onClick={() => setOrderCurrentPage(p => p - 1)} className="p-1 disabled:opacity-30"><ChevronLeft size={16}/></button>
+                      <span className="text-[10px] font-bold text-slate-400">Trang {orderCurrentPage}/{totalOrderPages}</span>
+                      <button disabled={orderCurrentPage === totalOrderPages} onClick={() => setOrderCurrentPage(p => p + 1)} className="p-1 disabled:opacity-30"><ChevronRight size={16}/></button>
                     </div>
                   )}
                 </div>
@@ -628,14 +456,17 @@ export default function App() {
   );
 }
 
-// Sub-components
+// Helpers
+const draftTotal = (draft: Record<string, number>, foods: FoodItem[]) => 
+  (Object.entries(draft) as [string, number][]).reduce((sum, [id, qty]) => sum + (foods.find(f => f.id === id)?.price || 0) * qty, 0);
+
 const SidebarLink = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) => (
   <button onClick={onClick} className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${active ? 'bg-emerald-50 text-emerald-600 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>{icon} {label}</button>
 );
 
 const FormField = ({ label, value, onChange, placeholder, type = "text" }: { label: string, value: any, onChange: (v: any) => void, placeholder: string, type?: string }) => (
   <div>
-    <label className="block text-sm font-bold text-slate-700 mb-1.5">{label}</label>
+    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">{label}</label>
     <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-sm" />
   </div>
 );
