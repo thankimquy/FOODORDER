@@ -23,7 +23,8 @@ import {
 import { FoodItem, Order, OrderItem, ViewType } from './types';
 import { db } from './services/db';
 
-const ORDERS_PER_PAGE = 5;
+// Cập nhật số lượng đơn hàng mỗi trang thành 30 theo yêu cầu
+const ORDERS_PER_PAGE = 30;
 
 export default function App() {
   const [view, setView] = useState<ViewType>('dashboard');
@@ -129,8 +130,13 @@ export default function App() {
   const totalRevenue = orders.reduce((sum, order) => sum + getOrderTotal(order), 0);
   
   const filteredFoods = foods.filter(f => f.name.toLowerCase().includes(searchTerm.toLowerCase()));
+  
+  // Lọc đơn hàng theo tên người đặt
   const filteredOrdersList = useMemo(() => {
-    return orderSearchTerm ? orders.filter(o => o.customerName.toLowerCase().includes(orderSearchTerm.toLowerCase())) : orders;
+    const filtered = orderSearchTerm 
+      ? orders.filter(o => o.customerName.toLowerCase().includes(orderSearchTerm.toLowerCase())) 
+      : orders;
+    return filtered;
   }, [orders, orderSearchTerm]);
 
   const totalOrderPages = Math.ceil(filteredOrdersList.length / ORDERS_PER_PAGE);
@@ -160,7 +166,7 @@ export default function App() {
            <div className="bg-slate-50 p-4 rounded-2xl">
               <p className="text-[10px] font-bold text-slate-400 uppercase mb-2">Thông tin</p>
               <div className="text-[11px] text-slate-600 font-medium space-y-1">
-                <p>Phiên bản: 2.0.0</p>
+                <p>Phiên bản: 2.1.0</p>
                 <p>Dữ liệu: Local Database</p>
               </div>
            </div>
@@ -353,14 +359,12 @@ export default function App() {
                   <h3 className="font-black text-xl mb-6 flex items-center gap-3"><ShoppingCart size={22} className="text-slate-400" /> Thanh toán</h3>
                   
                   <div className="space-y-3 mb-8 min-h-[120px] max-h-[240px] overflow-y-auto custom-scrollbar-dark pr-3">
-                    {/* Fix: Explicitly cast Object.entries to [string, number][] to avoid 'unknown' type for qty */}
                     {(Object.entries(draftQuantities) as [string, number][]).map(([id, qty]) => qty > 0 && (
                       <div key={id} className="flex justify-between items-center text-sm bg-slate-800/50 p-3 rounded-xl border border-slate-800">
                         <div className="flex flex-col">
                           <span className="font-bold">{foods.find(f => f.id === id)?.name}</span>
                           <span className="text-[10px] text-slate-500">Số lượng: {qty}</span>
                         </div>
-                        {/* Fix: The explicit cast of entries above ensures qty is of type number for this arithmetic operation */}
                         <span className="font-black">{( (foods.find(f => f.id === id)?.price || 0) * qty).toLocaleString()}đ</span>
                       </div>
                     ))}
@@ -373,7 +377,6 @@ export default function App() {
 
                   <div className="flex justify-between items-end mb-8 border-t border-slate-800 pt-6">
                     <div className="text-slate-500 text-xs font-bold uppercase">Tổng:</div>
-                    {/* Fix: Explicitly cast Object.entries to [string, number][] to avoid 'unknown' type for qty in reduce operation */}
                     <div className="text-4xl font-black text-white tracking-tighter">{((Object.entries(draftQuantities) as [string, number][]).reduce((sum, [id, qty]) => sum + (foods.find(f => f.id === id)?.price || 0) * qty, 0)).toLocaleString()}<span className="text-lg ml-1">đ</span></div>
                   </div>
 
@@ -385,10 +388,26 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Danh sách chờ */}
-                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex flex-col max-h-[450px]">
-                  <div className="p-6 bg-slate-50 border-b border-slate-100">
-                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><ClipboardList size={16} /> Lịch sử đơn</h4>
+                {/* Danh sách lịch sử đơn hàng */}
+                <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden flex flex-col max-h-[700px]">
+                  <div className="p-6 bg-slate-50 border-b border-slate-100 space-y-4">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                        <ClipboardList size={16} /> Lịch sử đơn hàng
+                    </h4>
+                    {/* Chỗ search theo tên người đặt */}
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      <input 
+                        type="text" 
+                        placeholder="Tìm theo tên khách hàng..." 
+                        value={orderSearchTerm} 
+                        onChange={e => {
+                            setOrderSearchTerm(e.target.value);
+                            setOrderCurrentPage(1); // Reset về trang 1 khi tìm kiếm
+                        }} 
+                        className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold outline-none focus:ring-4 focus:ring-slate-900/5 transition-all" 
+                      />
+                    </div>
                   </div>
                   <div className="overflow-y-auto flex-1 divide-y divide-slate-100 custom-scrollbar">
                     {paginatedOrders.map(o => (
@@ -408,14 +427,21 @@ export default function App() {
                              </span>
                           ))}
                         </div>
+                        <div className="mt-2 text-[8px] text-slate-400 font-bold uppercase">{o.orderDate}</div>
                       </div>
                     ))}
+                    {paginatedOrders.length === 0 && (
+                        <div className="p-10 text-center text-slate-300 text-xs italic">
+                            {orderSearchTerm ? 'Không tìm thấy kết quả' : 'Chưa có đơn hàng nào'}
+                        </div>
+                    )}
                   </div>
+                  {/* Phân trang (1 trang 30 đơn) */}
                   {totalOrderPages > 1 && (
                     <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
-                      <button disabled={orderCurrentPage === 1} onClick={() => setOrderCurrentPage(p => p - 1)} className="p-2 bg-white border border-slate-200 rounded-lg disabled:opacity-30"><ChevronLeft size={16}/></button>
-                      <span className="text-[10px] font-black text-slate-400">Trang {orderCurrentPage} / {totalOrderPages}</span>
-                      <button disabled={orderCurrentPage === totalOrderPages} onClick={() => setOrderCurrentPage(p => p + 1)} className="p-2 bg-white border border-slate-200 rounded-lg disabled:opacity-30"><ChevronRight size={16}/></button>
+                      <button disabled={orderCurrentPage === 1} onClick={() => setOrderCurrentPage(p => p - 1)} className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm disabled:opacity-30 transition-all hover:bg-slate-50"><ChevronLeft size={16}/></button>
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Trang {orderCurrentPage} / {totalOrderPages}</span>
+                      <button disabled={orderCurrentPage === totalOrderPages} onClick={() => setOrderCurrentPage(p => p + 1)} className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm disabled:opacity-30 transition-all hover:bg-slate-50"><ChevronRight size={16}/></button>
                     </div>
                   )}
                 </div>
